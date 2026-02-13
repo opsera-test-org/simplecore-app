@@ -2,11 +2,6 @@ name: "1-Bootstrap Infrastructure - simplecore-app"
 
 on:
   workflow_dispatch:
-    inputs:
-      aws_account_id:
-        description: "AWS Account ID"
-        required: true
-        type: string
 
 env:
   APP_NAME: simplecore-app
