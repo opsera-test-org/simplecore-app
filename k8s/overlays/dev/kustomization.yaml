@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: opsera-simplecore-app-dev
+
+resources:
+  - ../../base
+
+images:
+  - name: simplecore-app
+    newName: PLACEHOLDER_ECR_URI
+    newTag: latest
+
+labels:
+  - pairs:
+      environment: dev
+      tenant: opsera
+    includeSelectors: false
+
+replicas:
+  - name: simplecore-app
+    count: 2

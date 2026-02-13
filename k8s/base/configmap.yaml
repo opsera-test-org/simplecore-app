@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: simplecore-app-config
+  namespace: opsera-simplecore-app-dev
+  labels:
+    app: simplecore-app
+data:
+  ENVIRONMENT: "dev"
+  LOG_LEVEL: "info"
