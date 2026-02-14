@@ -8,6 +8,8 @@ metadata:
     tenant: opsera
     environment: staging
     service-type: active
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   type: ClusterIP
   ports:
@@ -28,6 +30,8 @@ metadata:
     tenant: opsera
     environment: staging
     service-type: preview
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   type: ClusterIP
   ports:
@@ -48,6 +52,8 @@ metadata:
     tenant: opsera
     environment: staging
     service-type: root
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   type: ClusterIP
   ports:

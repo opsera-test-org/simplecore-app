@@ -7,6 +7,8 @@ metadata:
     app: simpson
     tenant: opsera
     environment: staging
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   replicas: 2
   revisionHistoryLimit: 3
