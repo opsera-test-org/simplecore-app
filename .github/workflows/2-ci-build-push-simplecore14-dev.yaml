@@ -195,10 +195,7 @@ jobs:
           IMAGE_TAG="${{ needs.build-image.outputs.image_tag }}"
 
           docker tag ${APP_NAME}:${IMAGE_TAG} ${ECR_URI}:${IMAGE_TAG}
-          docker tag ${APP_NAME}:${IMAGE_TAG} ${ECR_URI}:latest
-
           docker push ${ECR_URI}:${IMAGE_TAG}
-          docker push ${ECR_URI}:latest
 
           echo "ecr_image=${ECR_URI}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
           echo "✓ Image pushed to ECR: ${ECR_URI}:${IMAGE_TAG}"
