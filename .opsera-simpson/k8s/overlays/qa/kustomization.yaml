@@ -12,7 +12,7 @@ resources:
 images:
   - name: simpson
     newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera/simpson
-    newTag: qa-latest
+    newTag: qa-f44c2d7b-20260214042322
 
 labels:
   - pairs:
