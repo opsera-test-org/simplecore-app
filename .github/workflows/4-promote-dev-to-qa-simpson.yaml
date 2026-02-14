@@ -217,11 +217,56 @@ jobs:
             fi
           done
 
-  # Stage 5: Create/Update ArgoCD Application
+  # Stage 5: Validate Manifests (FAST FAIL)
+  validate-manifests:
+    name: "🔍 Validate Manifests"
+    runs-on: ubuntu-latest
+    needs: update-qa-manifests
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+
+      - name: Build and Validate Kustomize
+        run: |
+          echo "Building kustomize manifests for ${TARGET_ENV}..."
+          kubectl kustomize ${APP_FOLDER}/k8s/overlays/${TARGET_ENV} > /tmp/manifests.yaml
+
+          echo "✅ Kustomize build successful"
+
+          # Check for placeholder values
+          if grep -q "PLACEHOLDER" /tmp/manifests.yaml; then
+            echo "❌ Found PLACEHOLDER values in manifests"
+            grep "PLACEHOLDER" /tmp/manifests.yaml
+            exit 1
+          fi
+
+          # Check for empty image tags
+          if grep -q "newTag: latest" /tmp/manifests.yaml && [ "${TARGET_ENV}" != "dev" ]; then
+            echo "⚠️ Warning: Using 'latest' tag in non-dev environment"
+          fi
+
+          echo "✅ Manifest validation passed"
+          echo "Generated manifest size: $(wc -l < /tmp/manifests.yaml) lines"
+
+      - name: Upload Manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: validated-manifests
+          path: /tmp/manifests.yaml
+          retention-days: 7
+
+  # Stage 6: Create/Update ArgoCD Application
   create-argocd-app:
     name: "📋 Create/Update ArgoCD App"
     runs-on: ubuntu-latest
-    needs: update-qa-manifests
+    needs: validate-manifests
     steps:
       - uses: actions/checkout@v4
         with:
@@ -244,7 +289,7 @@ jobs:
           kubectl --context hub get application ${APP_NAME}-${TARGET_ENV} -n argocd
           echo "✅ ArgoCD application created/updated"
 
-  # Stage 6: Refresh ECR Secret
+  # Stage 7: Refresh ECR Secret
   refresh-ecr-secret:
     name: "🔐 Refresh ECR Secret"
     runs-on: ubuntu-latest
@@ -277,7 +322,7 @@ jobs:
 
           echo "✅ ECR secret refreshed (valid for 12 hours)"
 
-  # Stage 7: Sync ArgoCD
+  # Stage 8: Sync ArgoCD
   sync-argocd:
     name: "🔄 Sync ArgoCD"
     runs-on: ubuntu-latest
@@ -364,7 +409,7 @@ jobs:
           echo "⚠️ Sync timeout - check ArgoCD manually"
           exit 1
 
-  # Stage 8: Monitor Canary Rollout
+  # Stage 9: Monitor Canary Rollout
   monitor-canary:
     name: "📊 Monitor Canary Rollout"
     runs-on: ubuntu-latest
@@ -407,7 +452,7 @@ jobs:
           echo "⚠️ Rollout monitoring timeout"
           kubectl --context spoke -n ${NS} get rollout ${APP_NAME}
 
-  # Stage 9: Verify Deployment
+  # Stage 10: Verify Deployment
   verify-deployment:
     name: "✅ Verify Deployment"
     runs-on: ubuntu-latest
@@ -442,7 +487,7 @@ jobs:
           kubectl --context spoke get ingress -n ${NS} ${APP_NAME}
           echo "✅ Ingress verified"
 
-  # Stage 10: Promotion Summary
+  # Stage 11: Promotion Summary
   promotion-summary:
     name: "📊 Promotion Summary"
     runs-on: ubuntu-latest
