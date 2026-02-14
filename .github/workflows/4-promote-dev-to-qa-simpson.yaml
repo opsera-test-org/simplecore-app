@@ -302,6 +302,45 @@ jobs:
             argocd.argoproj.io/refresh=hard --overwrite
           echo "✅ ArgoCD hard refresh triggered"
 
+      - name: Wait for Refresh to Complete
+        run: |
+          echo "Waiting for ArgoCD to refresh cache and generate manifests..."
+          for i in {1..30}; do
+            # Check if manifest generation succeeded
+            SYNC_STATUS=$(kubectl --context hub -n argocd get app ${APP_NAME}-${TARGET_ENV} -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+            SOURCE_TYPE=$(kubectl --context hub -n argocd get app ${APP_NAME}-${TARGET_ENV} -o jsonpath='{.status.sourceType}' 2>/dev/null || echo "Unknown")
+
+            # Check for manifest generation errors
+            CONDITIONS=$(kubectl --context hub -n argocd get app ${APP_NAME}-${TARGET_ENV} -o jsonpath='{.status.conditions}' 2>/dev/null || echo "[]")
+
+            echo "[$i/30] Status: $SYNC_STATUS, SourceType: $SOURCE_TYPE"
+
+            # If we see ComparisonError, the cache is still stale
+            if echo "$CONDITIONS" | grep -q "ComparisonError"; then
+              echo "⚠️ Manifest generation error detected, continuing to wait..."
+              sleep 10
+              continue
+            fi
+
+            # If source type is detected and no errors, refresh is complete
+            if [ "$SOURCE_TYPE" != "Unknown" ] && [ "$SOURCE_TYPE" != "" ]; then
+              echo "✅ Cache refresh complete, manifests regenerated"
+              break
+            fi
+
+            sleep 10
+          done
+
+          # Final check for errors
+          ERROR_MSG=$(kubectl --context hub -n argocd get app ${APP_NAME}-${TARGET_ENV} -o jsonpath='{.status.conditions[?(@.type=="ComparisonError")].message}' 2>/dev/null || echo "")
+          if [ -n "$ERROR_MSG" ]; then
+            echo "❌ Manifest generation still failing after refresh:"
+            echo "$ERROR_MSG"
+            exit 1
+          fi
+
+          echo "✅ Ready to sync"
+
       - name: Sync and Wait
         run: |
           kubectl --context hub -n argocd patch app ${APP_NAME}-${TARGET_ENV} \
