@@ -4,25 +4,24 @@ kind: Kustomization
 namespace: opsera-hb1-dev
 
 resources:
-  - ../../base
+- ../../base
 
 labels:
-  - includeSelectors: false
-    pairs:
-      environment: dev
-      managed-by: opsera-c2c
+- pairs:
+    environment: dev
+    managed-by: opsera-c2c
 
 images:
-  - name: hb1
-    newName: PLACEHOLDER_ECR_URI
-    newTag: PLACEHOLDER_TAG
+- name: hb1
+  newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera/hb1
+  newTag: 8eb5ef8-20260214115746
 
 configMapGenerator:
-  - name: hb1-config
-    behavior: merge
-    literals:
-      - ENVIRONMENT=dev
+- behavior: merge
+  literals:
+  - ENVIRONMENT=dev
+  name: hb1-config
 
 replicas:
-  - name: hb1
-    count: 2
+- count: 2
+  name: hb1
