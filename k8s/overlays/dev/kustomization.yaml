@@ -10,8 +10,8 @@ resources:
 
 images:
   - name: PLACEHOLDER_ECR_URI
-    newName: PLACEHOLDER_ECR_URI
-    newTag: PLACEHOLDER_TAG
+    newName: 440953937617.dkr.ecr.us-west-2.amazonaws.com/opsera/simpcore1
+    newTag: initial
 
 labels:
   - includeSelectors: false
