@@ -11,8 +11,8 @@ resources:
 
 images:
   - name: simpson
-    newName: PLACEHOLDER_ECR_URI/simpson
-    newTag: latest
+    newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera/simpson
+    newTag: qa-latest
 
 labels:
   - pairs:
