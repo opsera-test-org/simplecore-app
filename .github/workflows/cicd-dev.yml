@@ -284,21 +284,31 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Update kustomization with new image
         run: |
           cd k8s/overlays/dev
 
-          # Update image tag in kustomization.yaml
-          IMAGE_URI="${{ needs.push-to-ecr.outputs.image_uri }}"
+          # Get AWS account ID dynamically
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          IMAGE_TAG="${{ needs.build-image.outputs.image_tag }}"
+          ECR_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO_NAME }}"
 
-          if grep -q "newTag:" kustomization.yaml; then
-            sed -i "s|newTag:.*|newTag: ${{ needs.build-image.outputs.image_tag }}|" kustomization.yaml
+          # Update both newName and newTag in kustomization.yaml
+          if grep -q "newName:" kustomization.yaml && grep -q "newTag:" kustomization.yaml; then
+            sed -i "s|newName:.*|newName: ${ECR_IMAGE}|" kustomization.yaml
+            sed -i "s|newTag:.*|newTag: ${IMAGE_TAG}|" kustomization.yaml
+            echo "✓ Updated image to: ${ECR_IMAGE}:${IMAGE_TAG}"
           else
-            echo "Error: newTag not found in kustomization.yaml"
+            echo "❌ Error: newName or newTag not found in kustomization.yaml"
             exit 1
           fi
-
-          echo "✓ Updated image tag to: ${{ needs.build-image.outputs.image_tag }}"
 
       - name: Commit manifest changes (idempotent)
         run: |
