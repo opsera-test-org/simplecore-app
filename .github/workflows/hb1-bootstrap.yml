@@ -84,14 +84,10 @@ jobs:
 
       - name: Configure Hub Cluster Access
         run: |
-          echo "${{ secrets.HUB_KUBECONFIG }}" | base64 -d > /tmp/hub-kubeconfig
-          export KUBECONFIG=/tmp/hub-kubeconfig
-          kubectl config use-context ${HUB_CLUSTER}
+          aws eks update-kubeconfig --name ${HUB_CLUSTER} --region ${AWS_REGION}
           kubectl get nodes
 
       - name: Register Repository (Idempotent)
-        env:
-          KUBECONFIG: /tmp/hub-kubeconfig
         run: |
           REPO_SECRET_NAME="repo-$(echo ${GITHUB_REPOSITORY} | tr '/' '-')"
 
@@ -139,19 +135,16 @@ jobs:
 
       - name: Configure Cluster Access
         run: |
-          echo "${{ secrets.HUB_KUBECONFIG }}" | base64 -d > /tmp/hub-kubeconfig
-          echo "${{ secrets.SPOKE_KUBECONFIG }}" | base64 -d > /tmp/spoke-kubeconfig
-          export KUBECONFIG=/tmp/hub-kubeconfig:/tmp/spoke-kubeconfig
+          aws eks update-kubeconfig --name ${HUB_CLUSTER} --region ${AWS_REGION} --alias hub
+          aws eks update-kubeconfig --name ${SPOKE_CLUSTER} --region ${AWS_REGION} --alias spoke
           kubectl config get-contexts
 
       - name: Register Spoke Cluster (Idempotent)
-        env:
-          KUBECONFIG: /tmp/hub-kubeconfig:/tmp/spoke-kubeconfig
         run: |
           CLUSTER_SECRET_NAME="cluster-${SPOKE_CLUSTER}"
 
           # Check if spoke cluster is already registered (MUST use kubectl with hub context)
-          if kubectl --context ${HUB_CLUSTER} get secret "$CLUSTER_SECRET_NAME" -n argocd 2>/dev/null; then
+          if kubectl --context hub get secret "$CLUSTER_SECRET_NAME" -n argocd 2>/dev/null; then
             echo "✅ Spoke cluster already registered: ${SPOKE_CLUSTER}"
             exit 0
           fi
@@ -171,14 +164,14 @@ jobs:
           fi
 
           # Create service account token for ArgoCD
-          kubectl --context ${SPOKE_CLUSTER} create serviceaccount argocd-manager -n kube-system --dry-run=client -o yaml | kubectl --context ${SPOKE_CLUSTER} apply -f -
-          kubectl --context ${SPOKE_CLUSTER} create clusterrolebinding argocd-manager --clusterrole=cluster-admin --serviceaccount=kube-system:argocd-manager --dry-run=client -o yaml | kubectl --context ${SPOKE_CLUSTER} apply -f -
+          kubectl --context spoke create serviceaccount argocd-manager -n kube-system --dry-run=client -o yaml | kubectl --context spoke apply -f -
+          kubectl --context spoke create clusterrolebinding argocd-manager --clusterrole=cluster-admin --serviceaccount=kube-system:argocd-manager --dry-run=client -o yaml | kubectl --context spoke apply -f -
 
           # Create token (K8s 1.24+ compatible)
-          TOKEN=$(kubectl --context ${SPOKE_CLUSTER} create token argocd-manager -n kube-system --duration=87600h)
+          TOKEN=$(kubectl --context spoke create token argocd-manager -n kube-system --duration=87600h)
 
           # Create cluster secret
-          cat <<EOF | kubectl --context ${HUB_CLUSTER} apply -f -
+          cat <<EOF | kubectl --context hub apply -f -
           apiVersion: v1
           kind: Secret
           metadata:
@@ -249,13 +242,10 @@ jobs:
 
       - name: Configure Spoke Cluster Access
         run: |
-          echo "${{ secrets.SPOKE_KUBECONFIG }}" | base64 -d > /tmp/spoke-kubeconfig
-          export KUBECONFIG=/tmp/spoke-kubeconfig
-          kubectl config use-context ${SPOKE_CLUSTER}
+          aws eks update-kubeconfig --name ${SPOKE_CLUSTER} --region ${AWS_REGION}
+          kubectl get nodes
 
       - name: Create Namespaces (Idempotent)
-        env:
-          KUBECONFIG: /tmp/spoke-kubeconfig
         run: |
           for ENV in dev; do
             NAMESPACE="${TENANT}-${APP_NAME}-${ENV}"
@@ -292,13 +282,10 @@ jobs:
 
       - name: Configure Spoke Cluster Access
         run: |
-          echo "${{ secrets.SPOKE_KUBECONFIG }}" | base64 -d > /tmp/spoke-kubeconfig
-          export KUBECONFIG=/tmp/spoke-kubeconfig
-          kubectl config use-context ${SPOKE_CLUSTER}
+          aws eks update-kubeconfig --name ${SPOKE_CLUSTER} --region ${AWS_REGION}
+          kubectl get nodes
 
       - name: Create Service Accounts (Idempotent)
-        env:
-          KUBECONFIG: /tmp/spoke-kubeconfig
         run: |
           for ENV in dev; do
             NAMESPACE="${TENANT}-${APP_NAME}-${ENV}"

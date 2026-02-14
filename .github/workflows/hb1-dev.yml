@@ -211,13 +211,11 @@ jobs:
 
       - name: Configure Spoke Cluster Access
         run: |
-          echo "${{ secrets.SPOKE_KUBECONFIG }}" | base64 -d > /tmp/spoke-kubeconfig
-          export KUBECONFIG=/tmp/spoke-kubeconfig
-          kubectl config use-context ${{ env.SPOKE_CLUSTER }}
+          aws eks update-kubeconfig --name ${{ env.SPOKE_CLUSTER }} --region ${{ env.AWS_REGION }}
+          kubectl get nodes
 
       - name: Create/Update ECR Pull Secret
         env:
-          KUBECONFIG: /tmp/spoke-kubeconfig
           ECR_TOKEN: ${{ steps.aws.outputs.ecr_token }}
         run: |
           kubectl create secret docker-registry ecr-pull-secret \
@@ -294,6 +292,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Setup kubectl
         uses: azure/setup-kubectl@v3
         with:
@@ -301,13 +306,10 @@ jobs:
 
       - name: Configure Hub Cluster Access
         run: |
-          echo "${{ secrets.HUB_KUBECONFIG }}" | base64 -d > /tmp/hub-kubeconfig
-          export KUBECONFIG=/tmp/hub-kubeconfig
-          kubectl config use-context ${{ env.HUB_CLUSTER }}
+          aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
+          kubectl get nodes
 
       - name: Create/Update ArgoCD Application (Idempotent)
-        env:
-          KUBECONFIG: /tmp/hub-kubeconfig
         run: |
           cat <<EOF | kubectl apply -f -
           apiVersion: argoproj.io/v1alpha1
@@ -340,6 +342,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: create-argocd-app
     steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Setup kubectl
         uses: azure/setup-kubectl@v3
         with:
@@ -347,13 +356,10 @@ jobs:
 
       - name: Configure Hub Cluster Access
         run: |
-          echo "${{ secrets.HUB_KUBECONFIG }}" | base64 -d > /tmp/hub-kubeconfig
-          export KUBECONFIG=/tmp/hub-kubeconfig
-          kubectl config use-context ${{ env.HUB_CLUSTER }}
+          aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
+          kubectl get nodes
 
       - name: Trigger Hard Refresh
-        env:
-          KUBECONFIG: /tmp/hub-kubeconfig
         run: |
           APP_NAME="${{ env.TENANT }}-${{ env.APP_NAME }}-${{ env.ENVIRONMENT }}"
           kubectl patch app ${APP_NAME} -n argocd --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
@@ -366,6 +372,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: argocd-refresh
     steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Setup kubectl
         uses: azure/setup-kubectl@v3
         with:
@@ -373,21 +386,16 @@ jobs:
 
       - name: Configure Hub Cluster Access
         run: |
-          echo "${{ secrets.HUB_KUBECONFIG }}" | base64 -d > /tmp/hub-kubeconfig
-          export KUBECONFIG=/tmp/hub-kubeconfig
-          kubectl config use-context ${{ env.HUB_CLUSTER }}
+          aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
+          kubectl get nodes
 
       - name: Sync Application
-        env:
-          KUBECONFIG: /tmp/hub-kubeconfig
         run: |
           APP_NAME="${{ env.TENANT }}-${{ env.APP_NAME }}-${{ env.ENVIRONMENT }}"
           kubectl patch app ${APP_NAME} -n argocd --type merge -p '{"operation":{"initiatedBy":{"username":"github-actions"},"sync":{"revision":"main"}}}'
           echo "✅ Sync initiated"
 
       - name: Wait for Sync Completion
-        env:
-          KUBECONFIG: /tmp/hub-kubeconfig
         run: |
           APP_NAME="${{ env.TENANT }}-${{ env.APP_NAME }}-${{ env.ENVIRONMENT }}"
 
@@ -414,6 +422,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: argocd-sync
     steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Setup kubectl
         uses: azure/setup-kubectl@v3
         with:
@@ -421,13 +436,10 @@ jobs:
 
       - name: Configure Spoke Cluster Access
         run: |
-          echo "${{ secrets.SPOKE_KUBECONFIG }}" | base64 -d > /tmp/spoke-kubeconfig
-          export KUBECONFIG=/tmp/spoke-kubeconfig
-          kubectl config use-context ${{ env.SPOKE_CLUSTER }}
+          aws eks update-kubeconfig --name ${{ env.SPOKE_CLUSTER }} --region ${{ env.AWS_REGION }}
+          kubectl get nodes
 
       - name: Verify Pods
-        env:
-          KUBECONFIG: /tmp/spoke-kubeconfig
         run: |
           echo "Checking pods in namespace: ${{ env.NAMESPACE }}"
           kubectl get pods -n ${{ env.NAMESPACE }}
@@ -441,8 +453,6 @@ jobs:
           echo "✅ All pods are ready"
 
       - name: Verify Deployment
-        env:
-          KUBECONFIG: /tmp/spoke-kubeconfig
         run: |
           READY=$(kubectl get deployment ${{ env.APP_NAME }} -n ${{ env.NAMESPACE }} -o jsonpath='{.status.readyReplicas}')
           DESIRED=$(kubectl get deployment ${{ env.APP_NAME }} -n ${{ env.NAMESPACE }} -o jsonpath='{.status.replicas}')
