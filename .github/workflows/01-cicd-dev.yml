@@ -230,11 +230,59 @@ jobs:
           echo "✓ ECR secret refreshed in namespace: ${NAMESPACE}"
 
   # ================================================================
+  # STAGE 5.5: Create/Update ArgoCD Application (Idempotent)
+  # ================================================================
+  create-argocd-app:
+    name: Stage 5.5 - Create ArgoCD App
+    needs: refresh-ecr-secret
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.29.0'
+
+      - name: Configure hub cluster access
+        run: |
+          aws eks update-kubeconfig --name ${HUB_CLUSTER} --region ${AWS_REGION} --alias hub
+          kubectl config use-context hub
+
+      - name: Create or update ArgoCD application (Idempotent)
+        run: |
+          APP_NAME_ARGOCD="${APP_NAME}-${ENVIRONMENT}"
+
+          # Check if ArgoCD application already exists
+          if kubectl get application ${APP_NAME_ARGOCD} -n argocd 2>/dev/null; then
+            echo "✓ ArgoCD application already exists: ${APP_NAME_ARGOCD}"
+            echo "  Using existing application configuration"
+          else
+            echo "Creating ArgoCD application: ${APP_NAME_ARGOCD}"
+
+            # Apply the ArgoCD application from the repo
+            kubectl apply -f k8s-manifests/argocd/simp123-dev-application.yaml
+
+            echo "✓ ArgoCD application created: ${APP_NAME_ARGOCD}"
+          fi
+
+          # Verify application was created/exists
+          kubectl get application ${APP_NAME_ARGOCD} -n argocd -o jsonpath='{.metadata.name}'
+
+  # ================================================================
   # STAGE 6: Update Manifests
   # ================================================================
   update-manifests:
     name: Stage 6 - Update Manifests
-    needs: [build-image, refresh-ecr-secret]
+    needs: [build-image, create-argocd-app]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -454,6 +502,7 @@ jobs:
           echo "- ✅ Grype Scan (warn-only)" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Push to ECR" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Refresh ECR Secret" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Create ArgoCD App (idempotent)" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Update Manifests" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ ArgoCD Refresh" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ ArgoCD Sync" >> $GITHUB_STEP_SUMMARY
