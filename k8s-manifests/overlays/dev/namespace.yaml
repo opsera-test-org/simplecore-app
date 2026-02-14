@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: opsera-simp123-dev
-  labels:
-    tenant: opsera
-    app: simp123
-    environment: dev
-    managed-by: opsera-c2c
