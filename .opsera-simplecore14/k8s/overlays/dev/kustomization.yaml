@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: opsera-simplecore14-dev
+
+resources:
+  - ../../base
+
+images:
+  - name: PLACEHOLDER_ECR_URI
+    newName: PLACEHOLDER_ECR_URI
+    newTag: latest
+
+labels:
+  - includeSelectors: false
+    pairs:
+      environment: dev
+      version: latest
+
+patches:
+  - patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: simplecore14-dev.agent.opsera.dev
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: simplecore14-dev.agent.opsera.dev
+    target:
+      kind: Ingress
+      name: simplecore14

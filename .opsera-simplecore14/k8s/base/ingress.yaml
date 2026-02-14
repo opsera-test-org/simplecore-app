@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: simplecore14
+  labels:
+    app: simplecore14
+    tenant: opsera
+    managed-by: opsera-c2c
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: simplecore14-ENV.agent.opsera.dev
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: simplecore14
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - simplecore14-ENV.agent.opsera.dev
+    secretName: simplecore14-tls
