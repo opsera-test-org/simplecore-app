@@ -294,12 +294,53 @@ jobs:
           fi
 
   #━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # STAGE 6.5: CREATE/UPDATE ARGOCD APPLICATION (IDEMPOTENT)
+  #━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  create-argocd-app:
+    name: "Stage 6.5: Create ArgoCD Application"
+    runs-on: ubuntu-latest
+    needs: update-manifests
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure Hub Cluster Access
+        run: |
+          aws eks update-kubeconfig --name ${HUB_CLUSTER} --region ${AWS_REGION} --alias hub
+          kubectl config use-context hub
+
+      - name: Create/Update ArgoCD Application (Idempotent)
+        run: |
+          APP_NAME_FULL="${TENANT}-${APP_NAME}-${ENV}"
+
+          # Check if application exists
+          if kubectl --context hub get application ${APP_NAME_FULL} -n argocd &>/dev/null; then
+            echo "✓ ArgoCD application already exists: ${APP_NAME_FULL}"
+          else
+            echo "Creating ArgoCD application: ${APP_NAME_FULL}"
+            kubectl --context hub apply -f .opsera-${APP_NAME}/argocd/${APP_NAME}-${ENV}-application.yaml
+            echo "✓ ArgoCD application created: ${APP_NAME_FULL}"
+          fi
+
+  #━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # STAGE 7: ARGOCD HARD REFRESH (HUB)
   #━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   argocd-refresh:
     name: "Stage 7: ArgoCD Refresh (Hub)"
     runs-on: ubuntu-latest
-    needs: update-manifests
+    needs: create-argocd-app
     steps:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
