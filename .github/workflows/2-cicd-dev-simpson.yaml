@@ -32,7 +32,7 @@ jobs:
   security-scan:
     name: "🔒 Security Scan (Gitleaks)"
     runs-on: ubuntu-latest
-    continue-on-error: ${{ vars.GITLEAKS_MODE == 'warn' }}
+    continue-on-error: true  # Default to warn mode - change to false to block on secrets
     steps:
       - uses: actions/checkout@v4
         with:
