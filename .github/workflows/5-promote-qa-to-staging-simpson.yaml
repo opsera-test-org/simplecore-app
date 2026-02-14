@@ -334,7 +334,7 @@ jobs:
               targetRevision: HEAD
               path: PATH_PLACEHOLDER
             destination:
-              server: https://kubernetes.default.svc
+              name: spoke
               namespace: NAMESPACE_PLACEHOLDER
             syncPolicy:
               automated:
