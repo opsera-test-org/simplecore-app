@@ -5,6 +5,8 @@ namespace: opsera-simpson-dev
 
 resources:
   - ../../base
+  - deployment.yaml
+  - service.yaml
 
 images:
   - name: simpson

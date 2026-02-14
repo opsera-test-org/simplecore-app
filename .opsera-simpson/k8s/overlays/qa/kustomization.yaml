@@ -4,10 +4,7 @@ kind: Kustomization
 namespace: opsera-simpson-qa
 
 resources:
-  - ../../base/namespace.yaml
-  - ../../base/serviceaccount.yaml
-  - ../../base/configmap.yaml
-  - ../../base/ingress.yaml
+  - ../../base
   - rollout-canary.yaml
   - services-canary.yaml
   - analysis-template.yaml
