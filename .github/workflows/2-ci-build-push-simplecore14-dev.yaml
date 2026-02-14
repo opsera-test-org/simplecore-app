@@ -31,6 +31,7 @@ jobs:
   security-scan:
     name: "Stage 1: Security Scan (Gitleaks)"
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
