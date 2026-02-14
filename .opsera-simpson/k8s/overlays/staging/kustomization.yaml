@@ -12,7 +12,7 @@ resources:
 images:
   - name: simpson
     newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera/simpson
-    newTag: staging-latest
+    newTag: staging-0182f40a-20260214050303
 
 labels:
   - pairs:
