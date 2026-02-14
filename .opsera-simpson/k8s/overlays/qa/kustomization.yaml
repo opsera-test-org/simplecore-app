@@ -19,10 +19,5 @@ labels:
       environment: qa
     includeSelectors: false
 
-# ConfigMap for QA environment
-configMapGenerator:
-  - name: simpson-config
-    behavior: merge
-    literals:
-      - ENVIRONMENT=qa
-      - LOG_LEVEL=info
+# ENVIRONMENT is set via env var in rollout-canary.yaml
+# No need for ConfigMap override
