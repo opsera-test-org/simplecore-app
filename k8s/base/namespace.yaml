@@ -1,8 +1,9 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: opsera-simplecore-app-dev
+  name: opsera-simpcore1-dev
   labels:
-    app: simplecore-app
-    environment: dev
     tenant: opsera
+    app: simpcore1
+    environment: dev
+    managed-by: opsera-c2c

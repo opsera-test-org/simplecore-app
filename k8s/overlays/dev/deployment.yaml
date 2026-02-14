@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simpcore1
+  namespace: opsera-simpcore1-dev
+  labels:
+    app: simpcore1
+    environment: dev
+    tenant: opsera
+    managed-by: opsera-c2c
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: simpcore1
+  template:
+    metadata:
+      labels:
+        app: simpcore1
+        environment: dev
+        tenant: opsera
+    spec:
+      serviceAccountName: simpcore1
+      imagePullSecrets:
+        - name: ecr-secret
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101  # nginx user from unprivileged image
+        fsGroup: 101
+      containers:
+        - name: simpcore1
+          image: PLACEHOLDER_ECR_URI  # Will be replaced by kustomize
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: ENVIRONMENT
+              value: "dev"
+            - name: PORT
+              value: "8080"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12

@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: simpcore1
+  namespace: opsera-simpcore1-dev
+  labels:
+    app: simpcore1
+    environment: dev
+    tenant: opsera
+    managed-by: opsera-c2c
+spec:
+  type: ClusterIP
+  selector:
+    app: simpcore1
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+  sessionAffinity: None
