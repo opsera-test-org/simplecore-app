@@ -1,0 +1,47 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: simp123-dev
+  namespace: argocd
+  labels:
+    app: simp123
+    environment: dev
+    tenant: opsera
+    managed-by: opsera-c2c
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/opsera-test-org/simplecore-app.git
+    targetRevision: main
+    path: k8s-manifests/overlays/dev
+
+  destination:
+    # RULE 149: Use destination.name, NOT destination.server
+    name: opsera-usw2-np
+    namespace: opsera-simp123-dev
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  revisionHistoryLimit: 10
+
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
