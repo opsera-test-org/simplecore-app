@@ -115,6 +115,16 @@ jobs:
           DEV_TAG="${{ needs.get-dev-image.outputs.dev_image_tag }}"
           QA_TAG="${{ needs.get-dev-image.outputs.qa_image_tag }}"
 
+          # Check if QA tag already exists
+          if aws ecr describe-images \
+            --repository-name "${TENANT}/${APP_NAME}" \
+            --image-ids imageTag=${QA_TAG} \
+            --region ${AWS_REGION} &>/dev/null; then
+            echo "✓ QA tag already exists: ${QA_TAG}"
+            echo "✅ Image already tagged: ${ECR_URI}:${QA_TAG}"
+            exit 0
+          fi
+
           # Get image manifest
           MANIFEST=$(aws ecr batch-get-image \
             --repository-name "${TENANT}/${APP_NAME}" \
@@ -128,7 +138,7 @@ jobs:
             --repository-name "${TENANT}/${APP_NAME}" \
             --image-tag ${QA_TAG} \
             --image-manifest "$MANIFEST" \
-            --region ${AWS_REGION}
+            --region ${AWS_REGION} 2>&1 | grep -v "ImageAlreadyExistsException" || true
 
           echo "✅ Image re-tagged: ${ECR_URI}:${QA_TAG}"
 
