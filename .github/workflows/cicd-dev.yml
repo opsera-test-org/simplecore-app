@@ -313,9 +313,12 @@ jobs:
             echo "✓ No changes to commit (already up to date)"
           else
             git add k8s/overlays/dev/kustomization.yaml
-            git commit -m "Update dev image tag to ${{ needs.build-image.outputs.image_tag }} [skip ci]
+            git commit -m "$(cat <<'EOF'
+          Update dev image tag to ${{ needs.build-image.outputs.image_tag }} [skip ci]
 
-Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
+          Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
+          EOF
+          )"
 
             # Push with retry on conflict
             MAX_RETRIES=3
