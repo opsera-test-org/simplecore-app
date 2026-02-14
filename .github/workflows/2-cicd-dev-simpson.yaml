@@ -190,11 +190,9 @@ jobs:
 
           # Tag for ECR
           docker tag ${APP_NAME}:${IMAGE_TAG} ${ECR_URI}:${IMAGE_TAG}
-          docker tag ${APP_NAME}:${IMAGE_TAG} ${ECR_URI}:${ENV}-latest
 
-          # Push both tags
+          # Push timestamped tag only (no -latest tag to avoid immutable tag conflicts)
           docker push ${ECR_URI}:${IMAGE_TAG}
-          docker push ${ECR_URI}:${ENV}-latest
 
           echo "ecr_uri=${ECR_URI}" >> $GITHUB_OUTPUT
           echo "✅ Pushed to ECR: ${ECR_URI}:${IMAGE_TAG}"
