@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hb2
+  namespace: opsera-hb2-dev
+  labels:
+    app: hb2
+    tenant: opsera
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+spec:
+  rules:
+    - host: hb2-dev.agent.opsera.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hb2
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - hb2-dev.agent.opsera.dev
+      secretName: hb2-tls

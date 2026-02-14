@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: opsera-hb2-dev
+
+resources:
+  - ../../base
+
+labels:
+  - includeSelectors: false
+    pairs:
+      environment: dev
+      tenant: opsera
+      app: hb2
+      managed-by: opsera-c2c
+
+images:
+  - name: hb2
+    newName: PLACEHOLDER_ECR_URI
+    newTag: latest
+
+replicas:
+  - name: hb2
+    count: 2
