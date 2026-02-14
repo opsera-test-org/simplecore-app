@@ -4,21 +4,20 @@ kind: Kustomization
 namespace: opsera-hb2-dev
 
 resources:
-  - ../../base
+- ../../base
 
 labels:
-  - includeSelectors: false
-    pairs:
-      environment: dev
-      tenant: opsera
-      app: hb2
-      managed-by: opsera-c2c
+- pairs:
+    app: hb2
+    environment: dev
+    managed-by: opsera-c2c
+    tenant: opsera
 
 images:
-  - name: hb2
-    newName: PLACEHOLDER_ECR_URI
-    newTag: latest
+- name: hb2
+  newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera/hb2
+  newTag: 8eb5ef8-20260214115747
 
 replicas:
-  - name: hb2
-    count: 2
+- count: 2
+  name: hb2
