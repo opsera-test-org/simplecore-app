@@ -1,0 +1,75 @@
+name: "🔧 Fix ArgoCD App Destination"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-west-2
+  HUB_CLUSTER: argocd-usw2
+
+jobs:
+  fix-destination:
+    name: "🔧 Update App to Spoke Cluster"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+
+      - name: Setup Kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name ${HUB_CLUSTER} \
+            --region ${AWS_REGION} \
+            --alias hub
+
+      - name: Delete Existing App
+        run: |
+          echo "Deleting existing app with wrong destination..."
+          kubectl --context hub -n argocd delete app simpson-staging --wait=false || echo "App doesn't exist"
+          sleep 5
+
+      - name: Create App with Correct Destination
+        run: |
+          echo "Creating app with spoke cluster destination..."
+          cat <<EOF | kubectl --context hub apply -f -
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: simpson-staging
+            namespace: argocd
+          spec:
+            project: default
+            source:
+              repoURL: https://github.com/${{ github.repository }}.git
+              targetRevision: HEAD
+              path: .opsera-simpson/k8s/overlays/staging
+            destination:
+              name: spoke
+              namespace: opsera-simpson-staging
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
+          EOF
+
+      - name: Verify App
+        run: |
+          echo "Checking app status..."
+          sleep 10
+          kubectl --context hub get app simpson-staging -n argocd -o json | \
+            jq '{name: .metadata.name, destination: .spec.destination, sync: .status.sync.status, health: .status.health.status}'
