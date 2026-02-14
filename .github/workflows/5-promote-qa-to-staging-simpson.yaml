@@ -318,23 +318,24 @@ jobs:
           APP="${APP_NAME}-${TARGET_ENV}"
           NS="${TENANT}-${APP_NAME}-${TARGET_ENV}"
           REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
-          PATH="${APP_FOLDER}/k8s/overlays/${TARGET_ENV}"
+          MANIFEST_PATH="${APP_FOLDER}/k8s/overlays/${TARGET_ENV}"
 
-          cat <<EOF | kubectl --context hub apply -f -
+          # Create ArgoCD Application manifest
+          cat > /tmp/argocd-app.yaml <<'EOF'
           apiVersion: argoproj.io/v1alpha1
           kind: Application
           metadata:
-            name: ${APP}
+            name: APP_NAME_PLACEHOLDER
             namespace: argocd
           spec:
             project: default
             source:
-              repoURL: ${REPO_URL}
+              repoURL: REPO_URL_PLACEHOLDER
               targetRevision: HEAD
-              path: ${PATH}
+              path: PATH_PLACEHOLDER
             destination:
               server: https://kubernetes.default.svc
-              namespace: ${NS}
+              namespace: NAMESPACE_PLACEHOLDER
             syncPolicy:
               automated:
                 prune: true
@@ -342,6 +343,15 @@ jobs:
               syncOptions:
                 - CreateNamespace=true
           EOF
+
+          # Replace placeholders
+          sed -i "s|APP_NAME_PLACEHOLDER|${APP}|g" /tmp/argocd-app.yaml
+          sed -i "s|REPO_URL_PLACEHOLDER|${REPO_URL}|g" /tmp/argocd-app.yaml
+          sed -i "s|PATH_PLACEHOLDER|${MANIFEST_PATH}|g" /tmp/argocd-app.yaml
+          sed -i "s|NAMESPACE_PLACEHOLDER|${NS}|g" /tmp/argocd-app.yaml
+
+          # Apply manifest
+          kubectl --context hub apply -f /tmp/argocd-app.yaml
 
           echo "✅ ArgoCD application created/updated: ${APP}"
 
