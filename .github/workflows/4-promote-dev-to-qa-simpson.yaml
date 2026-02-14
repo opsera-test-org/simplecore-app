@@ -217,6 +217,13 @@ jobs:
           # Stage changes
           git add "$KUSTOMIZATION"
 
+          # Check if there are changes to commit (idempotent)
+          if git diff --cached --quiet; then
+            echo "✓ Manifest already up-to-date (${IMAGE_TAG})"
+            echo "✅ No changes needed - desired state already achieved"
+            exit 0
+          fi
+
           # Commit
           git commit -m "chore(promote): promote ${SOURCE_ENV} to ${TARGET_ENV} - ${IMAGE_TAG} [skip ci]"
 
