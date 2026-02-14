@@ -1,0 +1,31 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: simpson-dev
+  namespace: argocd
+  labels:
+    app: simpson
+    environment: dev
+    tenant: opsera
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/opsera-test-org/simplecore-app.git
+    targetRevision: main
+    path: .opsera-simpson/k8s/overlays/dev
+  destination:
+    name: opsera-usw2-np
+    namespace: opsera-simpson-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - Replace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

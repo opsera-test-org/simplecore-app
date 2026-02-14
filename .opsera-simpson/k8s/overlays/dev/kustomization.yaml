@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: opsera-simpson-dev
+
+resources:
+  - ../../base
+
+images:
+  - name: simpson
+    newName: PLACEHOLDER_ECR_URI/simpson
+    newTag: latest
+
+labels:
+  - pairs:
+      environment: dev
+    includeSelectors: false
