@@ -1,0 +1,60 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simpson-stable
+  namespace: opsera-simpson-qa
+  labels:
+    app: simpson
+    tenant: opsera
+    environment: qa
+    service-type: stable
+spec:
+  type: ClusterIP
+  selector:
+    app: simpson
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simpson-canary
+  namespace: opsera-simpson-qa
+  labels:
+    app: simpson
+    tenant: opsera
+    environment: qa
+    service-type: canary
+spec:
+  type: ClusterIP
+  selector:
+    app: simpson
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simpson
+  namespace: opsera-simpson-qa
+  labels:
+    app: simpson
+    tenant: opsera
+    environment: qa
+    service-type: root
+spec:
+  type: ClusterIP
+  selector:
+    app: simpson
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP

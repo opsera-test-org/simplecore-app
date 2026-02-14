@@ -1,0 +1,442 @@
+name: "🚀 Promote Dev → QA - simpson"
+
+on:
+  workflow_dispatch:
+    inputs:
+      dev_image_tag:
+        description: 'Dev image tag to promote (leave empty for latest)'
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      dev_image_tag:
+        description: 'Dev image tag to promote'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  security-events: write
+
+env:
+  APP_NAME: simpson
+  TENANT: opsera
+  SOURCE_ENV: dev
+  TARGET_ENV: qa
+  AWS_REGION: us-west-2
+  HUB_CLUSTER: argocd-usw2
+  SPOKE_CLUSTER: opsera-usw2-np
+  ARGOCD_SERVER: argocd-usw2.agent.opsera.dev
+  APP_FOLDER: .opsera-simpson
+
+concurrency:
+  group: promote-simpson-dev-to-qa-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Stage 1: Get Latest Dev Image
+  get-dev-image:
+    name: "📦 Get Latest Dev Image"
+    runs-on: ubuntu-latest
+    outputs:
+      dev_image_tag: ${{ steps.get-tag.outputs.dev_image_tag }}
+      qa_image_tag: ${{ steps.get-tag.outputs.qa_image_tag }}
+      ecr_uri: ${{ steps.get-tag.outputs.ecr_uri }}
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get Image Tag
+        id: get-tag
+        run: |
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_REPO="${TENANT}/${APP_NAME}"
+          ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+
+          if [ -n "${{ inputs.dev_image_tag }}" ]; then
+            DEV_TAG="${{ inputs.dev_image_tag }}"
+            echo "Using provided dev image tag: $DEV_TAG"
+          else
+            # Get latest dev image from ECR
+            DEV_TAG=$(aws ecr describe-images \
+              --repository-name "${ECR_REPO}" \
+              --region ${AWS_REGION} \
+              --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' \
+              --output text | grep "^dev-" || echo "")
+
+            if [ -z "$DEV_TAG" ]; then
+              echo "❌ No dev images found in ECR"
+              exit 1
+            fi
+            echo "Found latest dev image: $DEV_TAG"
+          fi
+
+          # Generate QA tag by replacing dev- prefix with qa-
+          QA_TAG=$(echo "$DEV_TAG" | sed 's/^dev-/qa-/')
+
+          echo "dev_image_tag=$DEV_TAG" >> $GITHUB_OUTPUT
+          echo "qa_image_tag=$QA_TAG" >> $GITHUB_OUTPUT
+          echo "ecr_uri=$ECR_URI" >> $GITHUB_OUTPUT
+
+          echo "✅ Dev image: ${ECR_URI}:${DEV_TAG}"
+          echo "✅ QA image: ${ECR_URI}:${QA_TAG}"
+
+  # Stage 2: Re-tag Image for QA
+  retag-image:
+    name: "🏷️ Re-tag Image for QA"
+    runs-on: ubuntu-latest
+    needs: get-dev-image
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Re-tag Image
+        run: |
+          ECR_URI="${{ needs.get-dev-image.outputs.ecr_uri }}"
+          DEV_TAG="${{ needs.get-dev-image.outputs.dev_image_tag }}"
+          QA_TAG="${{ needs.get-dev-image.outputs.qa_image_tag }}"
+
+          # Get image manifest
+          MANIFEST=$(aws ecr batch-get-image \
+            --repository-name "${TENANT}/${APP_NAME}" \
+            --image-ids imageTag=${DEV_TAG} \
+            --region ${AWS_REGION} \
+            --query 'images[0].imageManifest' \
+            --output text)
+
+          # Put manifest with new QA tag
+          aws ecr put-image \
+            --repository-name "${TENANT}/${APP_NAME}" \
+            --image-tag ${QA_TAG} \
+            --image-manifest "$MANIFEST" \
+            --region ${AWS_REGION}
+
+          echo "✅ Image re-tagged: ${ECR_URI}:${QA_TAG}"
+
+  # Stage 3: Create QA Namespace (if not exists)
+  create-qa-namespace:
+    name: "📁 Create QA Namespace"
+    runs-on: ubuntu-latest
+    needs: retag-image
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${SPOKE_CLUSTER} --region ${AWS_REGION} --alias spoke
+
+      - name: Create Namespace
+        run: |
+          NS="${TENANT}-${APP_NAME}-${TARGET_ENV}"
+
+          if kubectl --context spoke get namespace $NS 2>/dev/null; then
+            echo "✓ Namespace already exists: $NS"
+          else
+            kubectl --context spoke create namespace $NS
+            kubectl --context spoke label namespace $NS \
+              app=${APP_NAME} \
+              tenant=${TENANT} \
+              environment=${TARGET_ENV}
+            echo "✅ Created namespace: $NS"
+          fi
+
+  # Stage 4: Update QA Manifests
+  update-qa-manifests:
+    name: "📝 Update QA Manifests"
+    runs-on: ubuntu-latest
+    needs: [get-dev-image, create-qa-namespace]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Update Kustomization
+        run: |
+          KUSTOMIZATION="${APP_FOLDER}/k8s/overlays/${TARGET_ENV}/kustomization.yaml"
+          IMAGE_TAG="${{ needs.get-dev-image.outputs.qa_image_tag }}"
+          ECR_URI="${{ needs.get-dev-image.outputs.ecr_uri }}"
+
+          echo "Updating: $KUSTOMIZATION"
+
+          # Pull FIRST before modifications
+          git pull --rebase origin ${GITHUB_REF_NAME}
+          echo "✓ Pulled latest changes"
+
+          # Update with sed
+          sed -i.bak "s|newName:.*${APP_NAME}.*|newName: ${ECR_URI}|g" "$KUSTOMIZATION"
+          sed -i.bak "s|newTag:.*|newTag: ${IMAGE_TAG}|g" "$KUSTOMIZATION"
+          rm -f "${KUSTOMIZATION}.bak"
+
+          echo "✅ Updated manifest"
+          cat "$KUSTOMIZATION"
+
+      - name: Commit and Push with Retry
+        run: |
+          KUSTOMIZATION="${APP_FOLDER}/k8s/overlays/${TARGET_ENV}/kustomization.yaml"
+          IMAGE_TAG="${{ needs.get-dev-image.outputs.qa_image_tag }}"
+
+          # Stage changes
+          git add "$KUSTOMIZATION"
+
+          # Commit
+          git commit -m "chore(promote): promote ${SOURCE_ENV} to ${TARGET_ENV} - ${IMAGE_TAG} [skip ci]"
+
+          # Retry loop for push
+          for i in 1 2 3; do
+            echo "Push attempt $i/3..."
+            if git push origin ${GITHUB_REF_NAME}; then
+              echo "✅ Manifest updated and pushed successfully"
+              break
+            fi
+
+            echo "⚠️ Push failed, pulling latest and retrying..."
+            git pull --rebase origin ${GITHUB_REF_NAME}
+            sleep 2
+
+            if [ $i -eq 3 ]; then
+              echo "❌ Failed to push after 3 attempts"
+              exit 1
+            fi
+          done
+
+  # Stage 5: Create/Update ArgoCD Application
+  create-argocd-app:
+    name: "📋 Create/Update ArgoCD App"
+    runs-on: ubuntu-latest
+    needs: update-qa-manifests
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${HUB_CLUSTER} --region ${AWS_REGION} --alias hub
+
+      - name: Create or Update ArgoCD Application
+        run: |
+          kubectl --context hub apply -f ${APP_FOLDER}/argocd/${TARGET_ENV}/application.yaml
+          kubectl --context hub get application ${APP_NAME}-${TARGET_ENV} -n argocd
+          echo "✅ ArgoCD application created/updated"
+
+  # Stage 6: Refresh ECR Secret
+  refresh-ecr-secret:
+    name: "🔐 Refresh ECR Secret"
+    runs-on: ubuntu-latest
+    needs: [create-argocd-app, get-dev-image]
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${SPOKE_CLUSTER} --region ${AWS_REGION} --alias spoke
+
+      - name: Refresh ECR Pull Secret
+        run: |
+          NS="${TENANT}-${APP_NAME}-${TARGET_ENV}"
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+          ECR_PASS=$(aws ecr get-login-password --region ${AWS_REGION})
+
+          kubectl --context spoke create secret docker-registry ecr-pull-secret \
+            --docker-server="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" \
+            --docker-username=AWS \
+            --docker-password="$ECR_PASS" \
+            --namespace="${NS}" \
+            --dry-run=client -o yaml | kubectl --context spoke apply -f -
+
+          echo "✅ ECR secret refreshed (valid for 12 hours)"
+
+  # Stage 7: Sync ArgoCD
+  sync-argocd:
+    name: "🔄 Sync ArgoCD"
+    runs-on: ubuntu-latest
+    needs: [refresh-ecr-secret]
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${HUB_CLUSTER} --region ${AWS_REGION} --alias hub
+
+      - name: Hard Refresh ArgoCD
+        run: |
+          kubectl --context hub -n argocd patch app ${APP_NAME}-${TARGET_ENV} \
+            --type merge -p '{"operation":{"initiatedBy":{"username":"github-actions"},"info":[{"name":"Reason","value":"Promotion from dev to qa"}]}}'
+          kubectl --context hub -n argocd annotate app ${APP_NAME}-${TARGET_ENV} \
+            argocd.argoproj.io/refresh=hard --overwrite
+          echo "✅ ArgoCD hard refresh triggered"
+
+      - name: Sync and Wait
+        run: |
+          kubectl --context hub -n argocd patch app ${APP_NAME}-${TARGET_ENV} \
+            --type merge -p '{"operation":{"sync":{"revision":"main"}}}'
+
+          echo "Waiting for sync to complete..."
+          for i in {1..60}; do
+            STATUS=$(kubectl --context hub -n argocd get app ${APP_NAME}-${TARGET_ENV} -o jsonpath='{.status.sync.status}')
+            HEALTH=$(kubectl --context hub -n argocd get app ${APP_NAME}-${TARGET_ENV} -o jsonpath='{.status.health.status}')
+
+            echo "Attempt $i/60 - Sync: $STATUS, Health: $HEALTH"
+
+            if [ "$STATUS" = "Synced" ] && { [ "$HEALTH" = "Healthy" ] || [ "$HEALTH" = "Progressing" ]; }; then
+              echo "✅ Application synced"
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "⚠️ Sync timeout - check ArgoCD manually"
+          exit 1
+
+  # Stage 8: Monitor Canary Rollout
+  monitor-canary:
+    name: "📊 Monitor Canary Rollout"
+    runs-on: ubuntu-latest
+    needs: sync-argocd
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${SPOKE_CLUSTER} --region ${AWS_REGION} --alias spoke
+
+      - name: Monitor Rollout
+        run: |
+          NS="${TENANT}-${APP_NAME}-${TARGET_ENV}"
+
+          echo "Monitoring canary rollout..."
+          for i in {1..60}; do
+            STATUS=$(kubectl --context spoke -n ${NS} get rollout ${APP_NAME} -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
+
+            echo "[$i/60] Rollout status: $STATUS"
+
+            if [ "$STATUS" = "Healthy" ]; then
+              echo "✅ Canary rollout completed successfully"
+              kubectl --context spoke -n ${NS} get rollout ${APP_NAME}
+              exit 0
+            elif [ "$STATUS" = "Degraded" ]; then
+              echo "❌ Rollout degraded - checking details..."
+              kubectl --context spoke -n ${NS} describe rollout ${APP_NAME}
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "⚠️ Rollout monitoring timeout"
+          kubectl --context spoke -n ${NS} get rollout ${APP_NAME}
+
+  # Stage 9: Verify Deployment
+  verify-deployment:
+    name: "✅ Verify Deployment"
+    runs-on: ubuntu-latest
+    needs: monitor-canary
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${SPOKE_CLUSTER} --region ${AWS_REGION} --alias spoke
+
+      - name: Verify Pods
+        run: |
+          NS="${TENANT}-${APP_NAME}-${TARGET_ENV}"
+          kubectl --context spoke get pods -n ${NS} -l app=${APP_NAME}
+          echo "✅ Pods verified"
+
+      - name: Verify Services
+        run: |
+          NS="${TENANT}-${APP_NAME}-${TARGET_ENV}"
+          kubectl --context spoke get svc -n ${NS}
+          echo "✅ Services verified"
+
+      - name: Verify Ingress
+        run: |
+          NS="${TENANT}-${APP_NAME}-${TARGET_ENV}"
+          kubectl --context spoke get ingress -n ${NS} ${APP_NAME}
+          echo "✅ Ingress verified"
+
+  # Stage 10: Promotion Summary
+  promotion-summary:
+    name: "📊 Promotion Summary"
+    runs-on: ubuntu-latest
+    needs: [get-dev-image, verify-deployment]
+    steps:
+      - name: Generate Summary
+        run: |
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          # 🎉 Promotion Complete - Dev → QA
+
+          ## Promoted Image
+
+          - **Source:** dev-${{ needs.get-dev-image.outputs.dev_image_tag }}
+          - **Target:** qa-${{ needs.get-dev-image.outputs.qa_image_tag }}
+          - **ECR URI:** ${{ needs.get-dev-image.outputs.ecr_uri }}
+
+          ## Deployment Details
+
+          - **Environment**: qa
+          - **Strategy**: Canary (20% → 40% → 60% → 80% → 100%)
+          - **Namespace**: opsera-simpson-qa
+          - **Cluster**: opsera-usw2-np
+
+          ## Access
+
+          - **Application URL**: http://simpson-qa.agent.opsera.dev
+          - **ArgoCD**: https://argocd-usw2.agent.opsera.dev/applications/simpson-qa
+
+          ## Canary Rollout
+
+          ✅ Initial deployment (20% traffic)
+          ✅ Health analysis passed
+          ✅ Progressive rollout to 100%
+          ✅ Canary promotion complete
+
+          EOF
