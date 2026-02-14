@@ -1,0 +1,363 @@
+name: Bootstrap Infrastructure - simpson
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "bootstrap" to confirm'
+        required: true
+        default: ''
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  TENANT: opsera
+  APP_NAME: simpson
+  AWS_REGION: us-west-2
+  REGION_SHORT: usw2
+  HUB_CLUSTER: argocd-usw2
+  SPOKE_CLUSTER: opsera-usw2-np
+  ARGOCD_SERVER: argocd-usw2.agent.opsera.dev
+  ECR_REPO_NAME: opsera/simpson
+
+jobs:
+  validate-confirmation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "bootstrap" ]; then
+            echo "❌ Invalid confirmation"
+            exit 1
+          fi
+          echo "✅ Confirmed"
+
+  setup-ecr-repository:
+    needs: [validate-confirmation]
+    runs-on: ubuntu-latest
+    outputs:
+      ecr_uri: ${{ steps.ecr.outputs.ecr_uri }}
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get AWS Account ID
+        id: account
+        run: |
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "account_id=$AWS_ACCOUNT_ID" >> $GITHUB_OUTPUT
+
+      - name: Create ECR Repository
+        id: ecr
+        run: |
+          if aws ecr describe-repositories \
+            --repository-names "${{ env.ECR_REPO_NAME }}" 2>/dev/null; then
+            echo "✅ ECR exists: ${{ env.ECR_REPO_NAME }}"
+          else
+            aws ecr create-repository \
+              --repository-name "${{ env.ECR_REPO_NAME }}" \
+              --image-tag-mutability IMMUTABLE \
+              --encryption-configuration encryptionType=AES256 \
+              --tags Key=tenant,Value=${{ env.TENANT }} \
+                     Key=app,Value=${{ env.APP_NAME }}
+            echo "✅ ECR created: ${{ env.ECR_REPO_NAME }}"
+          fi
+
+          ECR_URI="${{ steps.account.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO_NAME }}"
+          echo "ecr_uri=$ECR_URI" >> $GITHUB_OUTPUT
+
+      - name: Summary
+        run: |
+          echo "### ECR Repository ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repo**: ${{ env.ECR_REPO_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **URI**: ${{ steps.ecr.outputs.ecr_uri }}" >> $GITHUB_STEP_SUMMARY
+
+  register-repository-argocd:
+    needs: [validate-confirmation]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Kubeconfig (Hub - Dynamic)
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.HUB_CLUSTER }}
+
+          kubectl cluster-info
+          echo "✅ Connected to hub: ${{ env.HUB_CLUSTER }}"
+
+      - name: Register Repository with ArgoCD
+        run: |
+          SECRET_NAME="repo-${{ github.repository_owner }}-${{ env.APP_NAME }}"
+
+          if kubectl get secret "$SECRET_NAME" -n argocd 2>/dev/null; then
+            echo "✅ Repository already registered"
+          else
+            kubectl create secret generic "$SECRET_NAME" \
+              -n argocd \
+              --from-literal=type=git \
+              --from-literal=url=https://github.com/${{ github.repository }}.git \
+              --from-literal=password=${{ secrets.GH_PAT }} \
+              --from-literal=username=git
+
+            kubectl label secret "$SECRET_NAME" \
+              -n argocd \
+              argocd.argoproj.io/secret-type=repository
+
+            echo "✅ Repository registered"
+          fi
+
+      - name: Summary
+        run: |
+          echo "### ArgoCD Repository ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repo**: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+
+  register-spoke-cluster:
+    needs: [validate-confirmation]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Kubeconfig (Hub + Spoke - Dynamic)
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.HUB_CLUSTER }} \
+            --alias ${{ env.HUB_CLUSTER }}
+
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.SPOKE_CLUSTER }} \
+            --alias ${{ env.SPOKE_CLUSTER }}
+
+          kubectl config use-context ${{ env.HUB_CLUSTER }}
+          kubectl cluster-info
+          echo "✅ Hub connected"
+
+          kubectl config use-context ${{ env.SPOKE_CLUSTER }}
+          kubectl cluster-info
+          echo "✅ Spoke connected"
+
+      - name: Register Spoke Cluster with ArgoCD
+        run: |
+          kubectl config use-context ${{ env.HUB_CLUSTER }}
+
+          if kubectl get secret cluster-${{ env.SPOKE_CLUSTER }} \
+            -n argocd 2>/dev/null; then
+            echo "✅ Spoke already registered"
+            exit 0
+          fi
+
+          SPOKE_SERVER=$(kubectl config view \
+            -o jsonpath="{.clusters[?(@.name=='${{ env.SPOKE_CLUSTER }}')].cluster.server}")
+          SPOKE_CA=$(kubectl config view --raw \
+            -o jsonpath="{.clusters[?(@.name=='${{ env.SPOKE_CLUSTER }}')].cluster.certificate-authority-data}")
+
+          kubectl config use-context ${{ env.SPOKE_CLUSTER }}
+          kubectl create namespace kube-system --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create serviceaccount argocd-manager -n kube-system \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create clusterrolebinding argocd-manager \
+            --clusterrole=cluster-admin \
+            --serviceaccount=kube-system:argocd-manager \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          TOKEN=$(kubectl create token argocd-manager -n kube-system \
+            --duration=87600h 2>/dev/null || \
+            kubectl get secret -n kube-system \
+              $(kubectl get sa argocd-manager -n kube-system \
+              -o jsonpath='{.secrets[0].name}') \
+              -o jsonpath='{.data.token}' | base64 -d)
+
+          kubectl config use-context ${{ env.HUB_CLUSTER }}
+          kubectl create secret generic cluster-${{ env.SPOKE_CLUSTER }} \
+            -n argocd \
+            --from-literal=name=${{ env.SPOKE_CLUSTER }} \
+            --from-literal=server=${SPOKE_SERVER} \
+            --from-literal=config="{\"bearerToken\":\"${TOKEN}\",\"tlsClientConfig\":{\"insecure\":false,\"caData\":\"${SPOKE_CA}\"}}"
+
+          kubectl label secret cluster-${{ env.SPOKE_CLUSTER }} \
+            -n argocd \
+            argocd.argoproj.io/secret-type=cluster
+
+          echo "✅ Spoke registered"
+
+      - name: Summary
+        run: |
+          echo "### Spoke Cluster ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Spoke**: ${{ env.SPOKE_CLUSTER }}" >> $GITHUB_STEP_SUMMARY
+
+  create-folder-structure:
+    needs: [validate-confirmation]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Create Folder Structure
+        run: |
+          mkdir -p .${{ env.TENANT }}-${{ env.APP_NAME }}/k8s/base
+          mkdir -p .${{ env.TENANT }}-${{ env.APP_NAME }}/k8s/overlays/dev
+          mkdir -p .${{ env.TENANT }}-${{ env.APP_NAME }}/argocd
+
+          echo "✅ Folders created"
+
+      - name: Create Config
+        run: |
+          cat > .${{ env.TENANT }}-${{ env.APP_NAME }}/opsera-config.yaml << 'EOF'
+          tenant: ${{ env.TENANT }}
+          app_name: ${{ env.APP_NAME }}
+          cloud_provider: aws
+          region: ${{ env.AWS_REGION }}
+          region_short: ${{ env.REGION_SHORT }}
+
+          clusters:
+            hub: ${{ env.HUB_CLUSTER }}
+            spoke: ${{ env.SPOKE_CLUSTER }}
+            argocd_server: ${{ env.ARGOCD_SERVER }}
+
+          environments:
+            - name: dev
+              namespace: ${{ env.TENANT }}-${{ env.APP_NAME }}-dev
+              deployment_strategy: rolling
+              replicas: 2
+              branch: main
+
+          ecr:
+            repository: ${{ env.ECR_REPO_NAME }}
+            region: ${{ env.AWS_REGION }}
+
+          integrations:
+            gitleaks:
+              enabled: true
+            grype:
+              enabled: true
+              mode: warn
+          EOF
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add .${{ env.TENANT }}-${{ env.APP_NAME }}/
+
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: folder structure for ${{ env.APP_NAME }} [skip ci]"
+            git push origin ${{ github.ref_name }}
+          fi
+
+      - name: Summary
+        run: |
+          echo "### Folder Structure ✅" >> $GITHUB_STEP_SUMMARY
+
+  create-namespaces:
+    needs: [validate-confirmation, register-spoke-cluster]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Kubeconfig (Spoke - Dynamic)
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.SPOKE_CLUSTER }}
+
+          kubectl cluster-info
+          echo "✅ Connected to spoke"
+
+      - name: Create Namespaces
+        run: |
+          NAMESPACE="${{ env.TENANT }}-${{ env.APP_NAME }}-dev"
+
+          if kubectl get namespace "$NAMESPACE" 2>/dev/null; then
+            echo "✅ Namespace exists"
+          else
+            kubectl create namespace "$NAMESPACE"
+            kubectl label namespace "$NAMESPACE" \
+              tenant=${{ env.TENANT }} \
+              app=${{ env.APP_NAME }} \
+              environment=dev
+            echo "✅ Namespace created"
+          fi
+
+      - name: Summary
+        run: |
+          echo "### Namespaces ✅" >> $GITHUB_STEP_SUMMARY
+
+  create-service-accounts:
+    needs: [validate-confirmation, create-namespaces]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Kubeconfig (Spoke - Dynamic)
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.SPOKE_CLUSTER }}
+
+      - name: Create Service Accounts
+        run: |
+          NAMESPACE="${{ env.TENANT }}-${{ env.APP_NAME }}-dev"
+          SA_NAME="${{ env.APP_NAME }}-sa"
+
+          if kubectl get serviceaccount "$SA_NAME" -n "$NAMESPACE" 2>/dev/null; then
+            echo "✅ Service account exists"
+          else
+            kubectl create serviceaccount "$SA_NAME" -n "$NAMESPACE"
+            echo "✅ Service account created"
+          fi
+
+      - name: Summary
+        run: |
+          echo "### Service Accounts ✅" >> $GITHUB_STEP_SUMMARY
+
+  bootstrap-summary:
+    needs: [setup-ecr-repository, register-repository-argocd, register-spoke-cluster, create-folder-structure, create-namespaces, create-service-accounts]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Complete
+        run: |
+          echo "### 🎉 Bootstrap Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "Trigger CI/CD: \`gh workflow run 2-deploy-dev-simpson.yaml\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Resources" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ ECR: \`${{ env.ECR_REPO_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Namespace: \`${{ env.TENANT }}-${{ env.APP_NAME }}-dev\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "*Powered by Opsera Code-to-Cloud Enterprise*" >> $GITHUB_STEP_SUMMARY
