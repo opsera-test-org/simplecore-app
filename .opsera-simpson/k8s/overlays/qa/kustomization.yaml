@@ -8,6 +8,7 @@ resources:
   - rollout-canary.yaml
   - services-canary.yaml
   - analysis-template.yaml
+  - ingress.yaml
 
 images:
   - name: simpson
