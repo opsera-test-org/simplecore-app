@@ -11,6 +11,7 @@ spec:
     - name: canary-health-check
       initialDelay: 30s
       interval: 30s
+      count: 5
       successCondition: result == "healthy"
       failureLimit: 3
       provider:
@@ -40,6 +41,7 @@ spec:
     - name: stable-health-check
       initialDelay: 30s
       interval: 30s
+      count: 5
       successCondition: result == "healthy"
       failureLimit: 3
       provider:
