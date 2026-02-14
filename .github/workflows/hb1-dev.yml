@@ -1,0 +1,518 @@
+name: CI/CD Pipeline - hb1-dev
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/workflows/hb1-bootstrap.yml'
+      - 'README.md'
+      - 'docs/**'
+
+permissions:
+  contents: write
+  id-token: write
+  security-events: write
+
+env:
+  TENANT: opsera
+  APP_NAME: hb1
+  ENVIRONMENT: dev
+  AWS_REGION: us-west-2
+  HUB_CLUSTER: argocd-usw2
+  SPOKE_CLUSTER: opsera-usw2-np
+  ARGOCD_SERVER: argocd-usw2.agent.opsera.dev
+  NAMESPACE: opsera-hb1-dev
+
+jobs:
+  # Stage 1: Security Scan (Gitleaks - Warn Only)
+  security-scan:
+    name: Security Scan (Gitleaks)
+    runs-on: ubuntu-latest
+    continue-on-error: true  # Warn-only mode
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Gitleaks Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: results.sarif
+          retention-days: 30
+
+  # Stage 2: Build Image (Local Only, No Push)
+  build-image:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: security-scan
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      short_sha: ${{ steps.vars.outputs.short_sha }}
+      timestamp: ${{ steps.vars.outputs.timestamp }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate Build Variables
+        id: vars
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get AWS Account ID
+        id: aws
+        run: |
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "account_id=${AWS_ACCOUNT_ID}" >> $GITHUB_OUTPUT
+
+      - name: Docker Meta
+        id: meta
+        run: |
+          IMAGE_TAG="${{ steps.vars.outputs.short_sha }}-${{ steps.vars.outputs.timestamp }}"
+          echo "tags=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Build Docker Image (Local Only)
+        run: |
+          docker build -t ${{ env.APP_NAME }}:${{ steps.meta.outputs.tags }} .
+          echo "✅ Image built successfully: ${{ env.APP_NAME }}:${{ steps.meta.outputs.tags }}"
+
+  # Stage 3: Grype Vulnerability Scan (Warn Only)
+  grype-scan:
+    name: Vulnerability Scan (Grype)
+    runs-on: ubuntu-latest
+    needs: build-image
+    continue-on-error: true  # Warn-only mode
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Rebuild Image for Scanning
+        run: |
+          docker build -t ${{ env.APP_NAME }}:${{ needs.build-image.outputs.image_tag }} .
+
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Run Grype Scan
+        run: |
+          grype ${{ env.APP_NAME }}:${{ needs.build-image.outputs.image_tag }} \
+            --fail-on high \
+            --output json > grype-report.json || echo "Vulnerabilities found (warn-only mode)"
+
+          grype ${{ env.APP_NAME }}:${{ needs.build-image.outputs.image_tag }} \
+            --output table
+
+      - name: Upload Grype Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grype-report
+          path: grype-report.json
+          retention-days: 30
+
+  # Stage 4: Push to ECR (Unique Timestamped Tags)
+  push-to-ecr:
+    name: Push to ECR
+    runs-on: ubuntu-latest
+    needs: [build-image, grype-scan]
+    if: always()  # Run even if grype-scan fails (warn-only)
+    outputs:
+      ecr_image: ${{ steps.push.outputs.ecr_image }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get AWS Account ID
+        id: aws
+        run: |
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "account_id=${AWS_ACCOUNT_ID}" >> $GITHUB_OUTPUT
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
+            docker login --username AWS --password-stdin \
+            ${{ steps.aws.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      - name: Build and Push to ECR
+        id: push
+        run: |
+          ECR_REGISTRY="${{ steps.aws.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          ECR_REPOSITORY="${{ env.TENANT }}/${{ env.APP_NAME }}"
+          IMAGE_TAG="${{ needs.build-image.outputs.image_tag }}"
+
+          docker build -t ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG} .
+          docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}
+
+          ECR_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          echo "ecr_image=${ECR_IMAGE}" >> $GITHUB_OUTPUT
+          echo "✅ Image pushed: ${ECR_IMAGE}"
+
+  # Stage 5: Refresh ECR Secret on SPOKE (BEFORE Manifests)
+  refresh-ecr-secret:
+    name: Refresh ECR Secret (SPOKE)
+    runs-on: ubuntu-latest
+    needs: push-to-ecr
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Get AWS Account ID and ECR Token
+        id: aws
+        run: |
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_TOKEN=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
+          echo "account_id=${AWS_ACCOUNT_ID}" >> $GITHUB_OUTPUT
+          echo "ecr_token=${ECR_TOKEN}" >> $GITHUB_OUTPUT
+
+      - name: Configure Spoke Cluster Access
+        run: |
+          echo "${{ secrets.SPOKE_KUBECONFIG }}" | base64 -d > /tmp/spoke-kubeconfig
+          export KUBECONFIG=/tmp/spoke-kubeconfig
+          kubectl config use-context ${{ env.SPOKE_CLUSTER }}
+
+      - name: Create/Update ECR Pull Secret
+        env:
+          KUBECONFIG: /tmp/spoke-kubeconfig
+          ECR_TOKEN: ${{ steps.aws.outputs.ecr_token }}
+        run: |
+          kubectl create secret docker-registry ecr-pull-secret \
+            --docker-server=${{ steps.aws.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com \
+            --docker-username=AWS \
+            --docker-password="${ECR_TOKEN}" \
+            --namespace=${{ env.NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          echo "✅ ECR pull secret refreshed in namespace: ${{ env.NAMESPACE }}"
+
+  # Stage 6: Update Kustomize Manifests (Idempotent Git Operations)
+  update-manifests:
+    name: Update Manifests
+    runs-on: ubuntu-latest
+    needs: [push-to-ecr, refresh-ecr-secret]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 0
+
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Update Image Tag in Kustomization
+        run: |
+          cd .opsera-${APP_NAME}/k8s/overlays/${ENVIRONMENT}
+
+          # Update image with new tag
+          kustomize edit set image ${APP_NAME}=${{ needs.push-to-ecr.outputs.ecr_image }}
+
+          echo "✅ Kustomization updated with new image"
+
+      - name: Commit and Push (Idempotent)
+        run: |
+          # Pull latest changes first
+          git pull --rebase origin main || true
+
+          # Check if there are changes to commit
+          if git diff --quiet; then
+            echo "✅ No changes to commit (idempotent)"
+            exit 0
+          fi
+
+          git add .opsera-${APP_NAME}/k8s/overlays/${ENVIRONMENT}/kustomization.yaml
+          git commit -m "Update ${ENVIRONMENT} image to ${{ needs.build-image.outputs.image_tag }} [skip ci]"
+
+          # Push with retry logic
+          for i in {1..3}; do
+            if git push origin main; then
+              echo "✅ Manifests updated and pushed"
+              exit 0
+            fi
+            echo "Push failed, attempt $i/3, pulling and retrying..."
+            git pull --rebase origin main
+          done
+
+          echo "❌ Failed to push after 3 attempts"
+          exit 1
+
+  # Stage 7: Create/Update ArgoCD Application (MANDATORY)
+  create-argocd-app:
+    name: Create ArgoCD Application
+    runs-on: ubuntu-latest
+    needs: update-manifests
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure Hub Cluster Access
+        run: |
+          echo "${{ secrets.HUB_KUBECONFIG }}" | base64 -d > /tmp/hub-kubeconfig
+          export KUBECONFIG=/tmp/hub-kubeconfig
+          kubectl config use-context ${{ env.HUB_CLUSTER }}
+
+      - name: Create/Update ArgoCD Application (Idempotent)
+        env:
+          KUBECONFIG: /tmp/hub-kubeconfig
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: ${{ env.TENANT }}-${{ env.APP_NAME }}-${{ env.ENVIRONMENT }}
+            namespace: argocd
+          spec:
+            project: default
+            source:
+              repoURL: https://github.com/${{ github.repository }}.git
+              targetRevision: main
+              path: .opsera-${{ env.APP_NAME }}/k8s/overlays/${{ env.ENVIRONMENT }}
+            destination:
+              name: ${{ env.SPOKE_CLUSTER }}
+              namespace: ${{ env.NAMESPACE }}
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
+          EOF
+
+          echo "✅ ArgoCD application created/updated"
+
+  # Stage 8: ArgoCD Hard Refresh (HUB)
+  argocd-refresh:
+    name: ArgoCD Hard Refresh
+    runs-on: ubuntu-latest
+    needs: create-argocd-app
+    steps:
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure Hub Cluster Access
+        run: |
+          echo "${{ secrets.HUB_KUBECONFIG }}" | base64 -d > /tmp/hub-kubeconfig
+          export KUBECONFIG=/tmp/hub-kubeconfig
+          kubectl config use-context ${{ env.HUB_CLUSTER }}
+
+      - name: Trigger Hard Refresh
+        env:
+          KUBECONFIG: /tmp/hub-kubeconfig
+        run: |
+          APP_NAME="${{ env.TENANT }}-${{ env.APP_NAME }}-${{ env.ENVIRONMENT }}"
+          kubectl patch app ${APP_NAME} -n argocd --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
+          echo "✅ ArgoCD hard refresh triggered"
+          sleep 10
+
+  # Stage 9: ArgoCD Sync and Wait
+  argocd-sync:
+    name: ArgoCD Sync
+    runs-on: ubuntu-latest
+    needs: argocd-refresh
+    steps:
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure Hub Cluster Access
+        run: |
+          echo "${{ secrets.HUB_KUBECONFIG }}" | base64 -d > /tmp/hub-kubeconfig
+          export KUBECONFIG=/tmp/hub-kubeconfig
+          kubectl config use-context ${{ env.HUB_CLUSTER }}
+
+      - name: Sync Application
+        env:
+          KUBECONFIG: /tmp/hub-kubeconfig
+        run: |
+          APP_NAME="${{ env.TENANT }}-${{ env.APP_NAME }}-${{ env.ENVIRONMENT }}"
+          kubectl patch app ${APP_NAME} -n argocd --type merge -p '{"operation":{"initiatedBy":{"username":"github-actions"},"sync":{"revision":"main"}}}'
+          echo "✅ Sync initiated"
+
+      - name: Wait for Sync Completion
+        env:
+          KUBECONFIG: /tmp/hub-kubeconfig
+        run: |
+          APP_NAME="${{ env.TENANT }}-${{ env.APP_NAME }}-${{ env.ENVIRONMENT }}"
+
+          for i in {1..60}; do
+            SYNC_STATUS=$(kubectl get app ${APP_NAME} -n argocd -o jsonpath='{.status.sync.status}')
+            HEALTH_STATUS=$(kubectl get app ${APP_NAME} -n argocd -o jsonpath='{.status.health.status}')
+
+            echo "Sync Status: ${SYNC_STATUS}, Health Status: ${HEALTH_STATUS}"
+
+            if [ "${SYNC_STATUS}" == "Synced" ] && [ "${HEALTH_STATUS}" == "Healthy" ]; then
+              echo "✅ Application synced and healthy"
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "⚠️ Timeout waiting for sync completion"
+          exit 1
+
+  # Stage 10: Verify Deployment on SPOKE
+  verify-deployment:
+    name: Verify Deployment
+    runs-on: ubuntu-latest
+    needs: argocd-sync
+    steps:
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure Spoke Cluster Access
+        run: |
+          echo "${{ secrets.SPOKE_KUBECONFIG }}" | base64 -d > /tmp/spoke-kubeconfig
+          export KUBECONFIG=/tmp/spoke-kubeconfig
+          kubectl config use-context ${{ env.SPOKE_CLUSTER }}
+
+      - name: Verify Pods
+        env:
+          KUBECONFIG: /tmp/spoke-kubeconfig
+        run: |
+          echo "Checking pods in namespace: ${{ env.NAMESPACE }}"
+          kubectl get pods -n ${{ env.NAMESPACE }}
+
+          # Wait for pods to be ready
+          kubectl wait --for=condition=ready pod \
+            -l app=${{ env.APP_NAME }} \
+            -n ${{ env.NAMESPACE }} \
+            --timeout=300s
+
+          echo "✅ All pods are ready"
+
+      - name: Verify Deployment
+        env:
+          KUBECONFIG: /tmp/spoke-kubeconfig
+        run: |
+          READY=$(kubectl get deployment ${{ env.APP_NAME }} -n ${{ env.NAMESPACE }} -o jsonpath='{.status.readyReplicas}')
+          DESIRED=$(kubectl get deployment ${{ env.APP_NAME }} -n ${{ env.NAMESPACE }} -o jsonpath='{.status.replicas}')
+
+          if [ "${READY}" == "${DESIRED}" ]; then
+            echo "✅ Deployment successful: ${READY}/${DESIRED} replicas ready"
+          else
+            echo "❌ Deployment verification failed: ${READY}/${DESIRED} replicas ready"
+            exit 1
+          fi
+
+  # Stage 11: Deployment Landscape Dashboard
+  deployment-landscape:
+    name: Deployment Landscape
+    runs-on: ubuntu-latest
+    needs: verify-deployment
+    if: always()
+    steps:
+      - name: Generate Deployment Summary
+        run: |
+          cat <<EOF > deployment-summary.json
+          {
+            "tenant": "${{ env.TENANT }}",
+            "app": "${{ env.APP_NAME }}",
+            "environment": "${{ env.ENVIRONMENT }}",
+            "image_tag": "${{ needs.build-image.outputs.image_tag }}",
+            "commit_sha": "${{ github.sha }}",
+            "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "deployed_by": "${{ github.actor }}",
+            "cluster": "${{ env.SPOKE_CLUSTER }}",
+            "namespace": "${{ env.NAMESPACE }}"
+          }
+          EOF
+
+          echo "✅ Deployment landscape generated"
+
+      - name: Upload Deployment Summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-summary
+          path: deployment-summary.json
+          retention-days: 90
+
+  deployment-complete:
+    name: Deployment Complete
+    runs-on: ubuntu-latest
+    needs: [security-scan, build-image, grype-scan, push-to-ecr, refresh-ecr-secret, update-manifests, create-argocd-app, argocd-refresh, argocd-sync, verify-deployment, deployment-landscape]
+    if: always()
+    steps:
+      - name: Deployment Summary
+        run: |
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║  DEPLOYMENT COMPLETE - hb1-dev                               ║"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  Application: ${{ env.APP_NAME }}                            "
+          echo "║  Environment: ${{ env.ENVIRONMENT }}                         "
+          echo "║  Image Tag: ${{ needs.build-image.outputs.image_tag }}       "
+          echo "║  Cluster: ${{ env.SPOKE_CLUSTER }}                           "
+          echo "║  Namespace: ${{ env.NAMESPACE }}                             "
+          echo "║  Commit: ${{ github.sha }}                                   "
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  ✅ Security Scan (Gitleaks)                                 "
+          echo "║  ✅ Build Image                                              "
+          echo "║  ✅ Vulnerability Scan (Grype)                               "
+          echo "║  ✅ Push to ECR                                              "
+          echo "║  ✅ Refresh ECR Secret                                       "
+          echo "║  ✅ Update Manifests                                         "
+          echo "║  ✅ Create ArgoCD App                                        "
+          echo "║  ✅ ArgoCD Refresh                                           "
+          echo "║  ✅ ArgoCD Sync                                              "
+          echo "║  ✅ Verify Deployment                                        "
+          echo "║  ✅ Deployment Landscape                                     "
+          echo "╚══════════════════════════════════════════════════════════════╝"

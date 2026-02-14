@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: opsera-hb1-dev
+
+resources:
+  - ../../base
+
+labels:
+  - includeSelectors: false
+    pairs:
+      environment: dev
+      managed-by: opsera-c2c
+
+images:
+  - name: hb1
+    newName: PLACEHOLDER_ECR_URI
+    newTag: PLACEHOLDER_TAG
+
+configMapGenerator:
+  - name: hb1-config
+    behavior: merge
+    literals:
+      - ENVIRONMENT=dev
+
+replicas:
+  - name: hb1
+    count: 2

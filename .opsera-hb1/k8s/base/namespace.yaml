@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opsera-hb1-dev
+  labels:
+    tenant: opsera
+    app: hb1
+    environment: dev
+    managed-by: opsera-c2c
