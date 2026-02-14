@@ -11,7 +11,7 @@ resources:
 images:
   - name: PLACEHOLDER_ECR_URI
     newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera/simpcore1
-    newTag: 10be19f-20260214101630 
+    newTag: 
 
 labels:
   - includeSelectors: false
